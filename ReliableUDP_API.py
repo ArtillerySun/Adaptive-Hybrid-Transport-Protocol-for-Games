@@ -3,8 +3,7 @@ import struct
 import time
 import threading
 import queue
-import sys
-import json
+
 
 # --- Header Configuration ---
 # B = Channel Type (1 byte), H = Seq/Ack Num (2 bytes), f = Timestamp (4 bytes)
@@ -89,7 +88,7 @@ class ReliableUDP_API:
         if ack_num in self.send_buffer:
             _packet, timer = self.send_buffer.pop(ack_num)
             timer.cancel()
-            print(f"  [API] Rcvd ACK for {ack_num}")
+            print(f"  [API] Received ACK for {ack_num}")
 
     def _handle_reliable(self, seq_num, data, timestamp, sender_addr):
         """
@@ -106,7 +105,7 @@ class ReliableUDP_API:
 
         # Buffer the packet
         self.receive_buffer[seq_num] = (data, timestamp)
-        print(f"  [API] Rcvd {seq_num}, buffering. (Next expected: {self.next_expected_seq_num})")
+        print(f"  [API] Received {seq_num}, buffering. (Next expected: {self.next_expected_seq_num})")
 
         # Try to deliver from the buffer
         while self.next_expected_seq_num in self.receive_buffer:
@@ -140,10 +139,10 @@ class ReliableUDP_API:
             # Send the packet
             self.sock.sendto(packet, self.remote_addr)
 
-            # Start a timer for *this specific packet*
+            # Start a timer
             timer = threading.Timer(RDT_TIMEOUT, self._retransmit_handler, args=[current_seq_num])
             
-            # Store the packet and timer in case it needs retransmission
+            # Store the packet and timer
             self.send_buffer[current_seq_num] = (packet, timer)
             timer.start()
 
@@ -153,14 +152,12 @@ class ReliableUDP_API:
         """
         with self.lock:
             if seq_num in self.send_buffer:
-                # Packet is still un-ACKed. Retransmit.
+                # Retransmit un-ACKed packet.
                 print(f"  [API] RETRANSMIT: Seq {seq_num} timed out. Resending.")
                 packet, old_timer = self.send_buffer[seq_num]
-                
-                # Resend the packet
                 self.sock.sendto(packet, self.remote_addr)
                 
-                # Start a new timer for it
+                # Start a new timer.
                 new_timer = threading.Timer(RDT_TIMEOUT, self._retransmit_handler, args=[seq_num])
                 self.send_buffer[seq_num] = (packet, new_timer)
                 new_timer.start()
