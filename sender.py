@@ -3,11 +3,7 @@ import struct
 import time
 import threading
 
-HEADER_FORMAT = '!B H I'
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-DATA_CHANNEL = 0
-ACK_CHANNEL = 2
-RDT_TIMEOUT = 0.1
+from utils import *
 
 class Sender:
     def __init__(self, sock, remote_addr, lock):
@@ -21,15 +17,13 @@ class Sender:
 
         print(f"API (Sender) bound to {self.sock.getsockname()}, sending to {self.remote_addr}")
     
-    def send(self, data: bytes):
+    def send_reliable(self, data: bytes):
         """
         (Sender-side) Public method to send reliable data.
         """
         with self.lock:
-            # Assign a new sequence number
-            self.seq_num += 1
             seq = self.seq_num
-            timestamp = (time.monotonic_ns() // 1_000_000) & 0xFFFFFFFF
+            timestamp = now_ms32()
 
             header = struct.pack(HEADER_FORMAT, DATA_CHANNEL, seq, timestamp)
             packet = header + data
@@ -43,7 +37,16 @@ class Sender:
             # Store the packet and timer
             self.send_buffer[seq] = (packet, timer)
             timer.start()
+
+            # Assign a new sequence number
+            self.seq_num = seq_inc(self.seq_num)
     
+    def send_unreliable(self, data: bytes):
+        timestamp = now_ms32()
+        header = struct.pack(HEADER_FORMAT, UNREL_CHANNEL, 0, timestamp)
+        packet = header + data
+        self.sock.sendto(packet, self.remote_addr)
+
     def handle_ack(self, ack_num: int):
         """
         (Sender-side) An ACK came in.

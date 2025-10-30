@@ -3,17 +3,10 @@ import struct
 import threading
 import queue
 
+from utils import *
+
 from sender import Sender
 from receiver import Receiver
-
-# --- Header Configuration ---
-# B = Channel Type (1 byte), H = Seq/Ack Num (2 bytes), I = Timestamp (4 bytes)
-HEADER_FORMAT = '!B H I'
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-DATA_CHANNEL = 0
-ACK_CHANNEL = 2
-RDT_TIMEOUT = 0.1
-
 
 class ReliableUDP_API:
     """
@@ -67,15 +60,21 @@ class ReliableUDP_API:
 
             if channel_type == DATA_CHANNEL:
                 self._receiver.handle_reliable(num, payload, timestamp, sender_addr)
-            elif channel_type == ACK_CHANNEL and self._sender is not None:
+            elif channel_type == ACK_CHANNEL:
                 self._sender.handle_ack(num)
+            elif channel_type == UNREL_CHANNEL:
+                self.delivery_queue.put((num, timestamp, payload))
+                continue
             else:
                 pass
 
-    def send(self, data: bytes):
-        if self._sender is None or self.remote_addr is None:
+    def send(self, data: bytes, reliable: bool = True):
+        if self._sender is None:
             raise RuntimeError("API has no remote; cannot send from a receiver-only endpoint.")
-        self._sender.send(data)
+        if reliable:
+            self._sender.send_reliable(data)
+        else:
+            self._sender.send_unreliable(data)
     
     def receive(self):
         try:
