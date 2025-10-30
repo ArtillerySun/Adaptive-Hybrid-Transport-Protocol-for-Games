@@ -29,7 +29,7 @@ class Sender:
             # Assign a new sequence number
             self.seq_num += 1
             seq = self.seq_num
-            timestamp = int(time.time() * 1000)
+            timestamp = (time.monotonic_ns() // 1_000_000) & 0xFFFFFFFF
 
             header = struct.pack(HEADER_FORMAT, DATA_CHANNEL, seq, timestamp)
             packet = header + data
