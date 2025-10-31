@@ -18,7 +18,6 @@ class ReliableUDP_API:
         self.remote_addr = (remote_host, remote_port) if remote_host is not None and remote_port is not None else None
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.settimeout(1.0)
         self.sock.bind(self.local_addr)
 
         # Delivery Queue for Application
@@ -34,41 +33,56 @@ class ReliableUDP_API:
         self.io_thread = threading.Thread(target=self._io_loop, daemon=True)
         self.io_thread.start()
 
+    # ----------------------------------------------------------------------
+    # Background I/O loop
+    # ----------------------------------------------------------------------
     def _io_loop(self):
         """
-        This thread listens for all incoming packets and demultiplexes them.
+        Receives all incoming packets, demultiplexes channels, and
+        drives the receiver's hole-skip via adaptive timeouts.
         """
         while not self.stop_event.is_set():
+
+            now_ms = now_ms32()
+            timeout = compute_recv_timeout_sec(now_ms, self._receiver.skip_deadline_ms)
+
             try:
+                self.sock.settimeout(timeout)
                 packet, sender_addr = self.sock.recvfrom(64 * 1024)
+
+                if len(packet) < HEADER_SIZE:
+                    continue
+
+                channel_type, seq, timestamp, payload = unpack_header(packet)
+
+                if channel_type == DATA_CHANNEL:
+                    self._receiver.handle_reliable(packet)
+                elif channel_type == ACK_CHANNEL:
+                    if self._sender is not None:
+                        self._sender.handle_ack(seq)
+                elif channel_type == UNREL_CHANNEL:
+                    self._receiver.handle_unreliable(packet)
+                    continue
+                else:
+                    continue
+
             except socket.timeout:
-                continue
+                self._receiver.on_idle(now_ms32())
             except Exception as e:
+                # Keep the loop alive on unexpected errors
                 if not self.stop_event.is_set():
-                    print(f"API Receive error: {e}")
+                    print(f"[API] Receive error: {e}")
                 continue
 
-            if len(packet) < HEADER_SIZE:
-                continue
-
-            try:
-                channel_type, num, timestamp = struct.unpack(HEADER_FORMAT, packet[:HEADER_SIZE])
-            except struct.error:
-                continue
-
-            payload = packet[HEADER_SIZE:]
-
-            if channel_type == DATA_CHANNEL:
-                self._receiver.handle_reliable(num, payload, timestamp, sender_addr)
-            elif channel_type == ACK_CHANNEL:
-                self._sender.handle_ack(num)
-            elif channel_type == UNREL_CHANNEL:
-                self.delivery_queue.put((num, timestamp, payload))
-                continue
-            else:
-                pass
-
+    # ----------------------------------------------------------------------
+    # Public API
+    # ----------------------------------------------------------------------
     def send(self, data: bytes, reliable: bool = True):
+        """
+        Send data to the remote peer.
+        - reliable=True: goes via the reliable channel (SR with retransmission).
+        - reliable=False: goes via the unreliable channel (best-effort).
+        """
         if self._sender is None:
             raise RuntimeError("API has no remote; cannot send from a receiver-only endpoint.")
         if reliable:
@@ -77,6 +91,13 @@ class ReliableUDP_API:
             self._sender.send_unreliable(data)
     
     def receive(self):
+        """
+        Non-blocking read from the delivery queue.
+        Returns:
+          - (seq, ts_ms, payload) for reliable channel
+          - (None, ts_ms, payload) for unreliable channel
+          or None if no message is available.
+        """
         try:
             return self.delivery_queue.get_nowait()
         except queue.Empty:
@@ -88,7 +109,10 @@ class ReliableUDP_API:
         self.stop_event.set()
         
         if self._sender is not None:
-            self._sender.cancel_all() 
+            try:
+                self._sender.cancel_all()
+            except Exception:
+                pass
 
         try:
             self.io_thread.join(timeout=1.0)
