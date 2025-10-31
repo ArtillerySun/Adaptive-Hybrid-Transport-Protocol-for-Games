@@ -1,17 +1,12 @@
 import socket
 import struct
-import time
 import threading
 import queue
 
+from utils import *
 
-# --- Header Configuration ---
-# B = Channel Type (1 byte), H = Seq/Ack Num (2 bytes), f = Timestamp (4 bytes)
-HEADER_FORMAT = '!B H f'
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-DATA_CHANNEL = 0
-ACK_CHANNEL = 2
-RDT_TIMEOUT = 0.1
+from sender import Sender
+from receiver import Receiver
 
 class ReliableUDP_API:
     """
@@ -20,22 +15,10 @@ class ReliableUDP_API:
 
     def __init__(self, local_port, remote_host=None, remote_port=None):
         self.local_addr = ('0.0.0.0', local_port)
-        if remote_host:
-            self.remote_addr = (remote_host, remote_port)
-        else:
-            self.remote_addr = None
+        self.remote_addr = (remote_host, remote_port) if remote_host is not None and remote_port is not None else None
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.settimeout(1.0)
         self.sock.bind(self.local_addr)
-
-        # Sender State
-        self.seq_num = 0 
-        self.send_buffer = {}
-
-        # Receiver State
-        self.next_expected_seq_num = 1
-        self.receive_buffer = {}
 
         # Delivery Queue for Application
         self.delivery_queue = queue.Queue()
@@ -43,128 +26,78 @@ class ReliableUDP_API:
         # Threading Control
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
-        self.receive_thread = threading.Thread(target=self._receiver_loop, daemon=True)
-        self.receive_thread.start()
 
-        if self.remote_addr:
-            print(f"API (Sender) bound to {self.local_addr}, sending to {self.remote_addr}")
-        else:
-            print(f"API (Receiver) listening on {self.local_addr}")
+        self._receiver = Receiver(self.sock, self.delivery_queue, self.lock)
+        self._sender = Sender(self.sock, self.remote_addr, self.lock) if self.remote_addr else None
 
-    def _receiver_loop(self):
+        self.io_thread = threading.Thread(target=self._io_loop, daemon=True)
+        self.io_thread.start()
+
+    # ----------------------------------------------------------------------
+    # Background I/O loop
+    # ----------------------------------------------------------------------
+    def _io_loop(self):
         """
-        This thread listens for all incoming packets and demultiplexes them.
+        Receives all incoming packets, demultiplexes channels, and
+        drives the receiver's hole-skip via adaptive timeouts.
         """
         while not self.stop_event.is_set():
-            try:
-                packet, sender_addr = self.sock.recvfrom(1024)
-            except socket.timeout:
-                continue
-            except Exception as e:
-                if not self.stop_event.is_set():
-                    print(f"Receive error: {e}")
-                continue
 
-            if len(packet) < HEADER_SIZE:
-                continue
+            now_ms = now_ms32()
+            timeout = compute_recv_timeout_sec(now_ms, self._receiver.skip_deadline_ms)
 
             try:
-                channel_type, num, timestamp = struct.unpack(HEADER_FORMAT, packet[:HEADER_SIZE])
-            except struct.error:
-                continue
+                self.sock.settimeout(timeout)
+                packet, sender_addr = self.sock.recvfrom(64 * 1024)
 
-            # Demultiplexing
-            with self.lock:
+                if len(packet) < HEADER_SIZE:
+                    continue
+
+                channel_type, seq, timestamp, payload = unpack_header(packet)
+
                 if channel_type == DATA_CHANNEL:
-                    data = packet[HEADER_SIZE:]
-                    self._handle_reliable(num, data, timestamp, sender_addr)
+                    self._receiver.handle_reliable(packet, sender_addr)
                 elif channel_type == ACK_CHANNEL:
-                    self._handle_ack(num)
+                    if self._sender is not None:
+                        self._sender.handle_ack(seq)
+                elif channel_type == UNREL_CHANNEL:
+                    self._receiver.handle_unreliable(packet)
+                    continue
+                else:
+                    continue
 
-    def _handle_ack(self, ack_num):
+            except socket.timeout:
+                self._receiver.on_idle(now_ms32())
+            except OSError as e:
+                if e.errno == 11:
+                    # nothing to read, just idle
+                    self._receiver.on_idle(now_ms32())
+                else:
+                    print(f"API Receive error: {e}")
+
+    # ----------------------------------------------------------------------
+    # Public API
+    # ----------------------------------------------------------------------
+    def send(self, data: bytes, reliable: bool = True):
         """
-        (Sender-side) An ACK came in.
+        Send data to the remote peer.
+        - reliable=True: goes via the reliable channel (SR with retransmission).
+        - reliable=False: goes via the unreliable channel (best-effort).
         """
-        if ack_num in self.send_buffer:
-            _packet, timer = self.send_buffer.pop(ack_num)
-            timer.cancel()
-            print(f"  [API] Received ACK for {ack_num}")
-
-    def _handle_reliable(self, seq_num, data, timestamp, sender_addr):
-        """
-        (Receiver-side) A data packet came in.
-        """
-        # ACK what you receive
-        self._send_ack(seq_num, sender_addr)
-
-        if seq_num < self.next_expected_seq_num:
-            return
-
-        if seq_num in self.receive_buffer:
-            return
-
-        # Buffer the packet
-        self.receive_buffer[seq_num] = (data, timestamp)
-        print(f"  [API] Received {seq_num}, buffering. (Next expected: {self.next_expected_seq_num})")
-
-        # Try to deliver from the buffer
-        while self.next_expected_seq_num in self.receive_buffer:
-            data_to_deliver, ts_to_deliver = self.receive_buffer.pop(self.next_expected_seq_num)
-            self.delivery_queue.put((self.next_expected_seq_num, ts_to_deliver, data_to_deliver))
-            self.next_expected_seq_num += 1
-
-    def _send_ack(self, ack_num, addr):
-        """
-        (Receiver-side) Helper to send an ACK packet.
-        """
-        try:
-            header = struct.pack(HEADER_FORMAT, ACK_CHANNEL, ack_num, 0.0)
-            self.sock.sendto(header, addr)
-        except Exception as e:
-            print(f"Error sending ACK: {e}")
-
-    def send(self, data: bytes):
-        """
-        (Sender-side) Public method to send reliable data.
-        """
-        with self.lock:
-            # Assign a new sequence number
-            self.seq_num += 1
-            current_seq_num = self.seq_num
-            timestamp = time.time()
-
-            header = struct.pack(HEADER_FORMAT, DATA_CHANNEL, current_seq_num, timestamp)
-            packet = header + data
-            
-            # Send the packet
-            self.sock.sendto(packet, self.remote_addr)
-
-            # Start a timer
-            timer = threading.Timer(RDT_TIMEOUT, self._retransmit_handler, args=[current_seq_num])
-            
-            # Store the packet and timer
-            self.send_buffer[current_seq_num] = (packet, timer)
-            timer.start()
-
-    def _retransmit_handler(self, seq_num):
-        """
-        (Sender-side) Called by a timer when an ACK wasn't received.
-        """
-        with self.lock:
-            if seq_num in self.send_buffer:
-                # Retransmit un-ACKed packet.
-                print(f"  [API] RETRANSMIT: Seq {seq_num} timed out. Resending.")
-                packet, old_timer = self.send_buffer[seq_num]
-                self.sock.sendto(packet, self.remote_addr)
-                
-                # Start a new timer.
-                new_timer = threading.Timer(RDT_TIMEOUT, self._retransmit_handler, args=[seq_num])
-                self.send_buffer[seq_num] = (packet, new_timer)
-                new_timer.start()
-
+        if self._sender is None:
+            raise RuntimeError("API has no remote; cannot send from a receiver-only endpoint.")
+        if reliable:
+            self._sender.send_reliable(data)
+        else:
+            self._sender.send_unreliable(data)
+    
     def receive(self):
         """
-        (Receiver-side) Method for the app to get data.
+        Non-blocking read from the delivery queue.
+        Returns:
+          - (seq, ts_ms, payload) for reliable channel
+          - (None, ts_ms, payload) for unreliable channel
+          or None if no message is available.
         """
         try:
             return self.delivery_queue.get_nowait()
@@ -175,12 +108,18 @@ class ReliableUDP_API:
         """Shuts down the API."""
         print("Closing API... stopping threads...")
         self.stop_event.set()
-        self.receive_thread.join()
         
-        with self.lock:
-            for _seq, (_packet, timer) in self.send_buffer.items():
-                timer.cancel()
-                
+        if self._sender is not None:
+            try:
+                self._sender.cancel_all()
+            except Exception:
+                pass
+
+        try:
+            self.io_thread.join(timeout=1.0)
+        except RuntimeError:
+            pass
+                       
         self.sock.close()
-        print("Socket closed.")
+        print("API closed.")
         
