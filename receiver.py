@@ -45,7 +45,18 @@ class Receiver:
             self.skip_deadline_ms = None  # reset skip timer when sequence advances
 
     # ----------------------------------------------------------------------
-    # Reliable data handler  (original entry point, enhanced)
+    # Send ACK 
+    # ----------------------------------------------------------------------
+    def _send_ack(self, seq: int, sender_addr):
+        try:
+            ack_pkt = pack_header(ACK_CHANNEL, seq, now_ms32())
+            self.sock.sendto(ack_pkt, sender_addr)
+        except Exception as e:
+            print(f"API (Receiver) ACK send error (seq={seq}): {e}")
+
+
+    # ----------------------------------------------------------------------
+    # Reliable data handler
     # ----------------------------------------------------------------------
     def handle_reliable(self, packet: bytes, sender_addr):
         """
@@ -53,18 +64,20 @@ class Receiver:
         Performs buffering, ordered delivery, and sets a skip deadline if needed.
         """
         chan, seq, ts_ms, payload = unpack_header(packet)
+        
+        # ignore non-reliable packets
         if chan != DATA_CHANNEL:
-            return  # ignore non-reliable packets
+            return
+
+        # --- send ACK immediately (even if duplicate) ---
+        self._send_ack(seq, sender_addr)
+
+        # ignore duplicate packets
+        if seq < self.next_expected_seq_num:
+            return
 
         # Store the packet in the reordering buffer
         self.receive_buffer[seq] = (payload, ts_ms)
-
-        # --- send ACK immediately (even if duplicate) ---
-        try:
-            ack_pkt = pack_header(ACK_CHANNEL, seq, now_ms32())
-            self.sock.sendto(ack_pkt, sender_addr)
-        except Exception as e:
-            print(f"API (Receiver) ACK send error (seq={seq}): {e}")
 
         # Attempt in-order delivery of buffered data
         self._try_deliver_from_buffer()
@@ -102,6 +115,10 @@ class Receiver:
         number is still missing, skip it (advance 'next_expected_seq_num')
         so that later packets can be delivered immediately.
         """
+
+        if not self.receive_buffer:
+            return
+
         ttd = time_to_deadline_ms(now_ms, self.skip_deadline_ms)
         if ttd is not None and ttd <= 0 and self.next_expected_seq_num not in self.receive_buffer:
             missing = self.next_expected_seq_num

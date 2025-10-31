@@ -68,11 +68,12 @@ class ReliableUDP_API:
 
             except socket.timeout:
                 self._receiver.on_idle(now_ms32())
-            except Exception as e:
-                # Keep the loop alive on unexpected errors
-                if not self.stop_event.is_set():
+            except OSError as e:
+                if e.errno == 11:
+                    # nothing to read, just idle
+                    self._receiver.on_idle(now_ms32())
+                else:
                     print(f"API Receive error: {e}")
-                continue
 
     # ----------------------------------------------------------------------
     # Public API
