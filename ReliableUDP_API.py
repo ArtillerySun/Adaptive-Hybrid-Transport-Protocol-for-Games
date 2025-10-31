@@ -56,7 +56,7 @@ class ReliableUDP_API:
                 channel_type, seq, timestamp, payload = unpack_header(packet)
 
                 if channel_type == DATA_CHANNEL:
-                    self._receiver.handle_reliable(packet)
+                    self._receiver.handle_reliable(packet, sender_addr)
                 elif channel_type == ACK_CHANNEL:
                     if self._sender is not None:
                         self._sender.handle_ack(seq)
@@ -71,7 +71,7 @@ class ReliableUDP_API:
             except Exception as e:
                 # Keep the loop alive on unexpected errors
                 if not self.stop_event.is_set():
-                    print(f"[API] Receive error: {e}")
+                    print(f"API Receive error: {e}")
                 continue
 
     # ----------------------------------------------------------------------

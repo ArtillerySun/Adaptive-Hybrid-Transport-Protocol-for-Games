@@ -73,7 +73,7 @@ class Sender:
             timer.cancel()
             
             self.inflight = max(0, self.inflight - 1)
-            print(f"  [API] Received ACK for {ack_num}")
+            print(f"API (Sender) Received ACK for {ack_num}")
 
             # Try to fill the window with queued payloads
             while self.pending_q and self.inflight < self.SND_WIN:
@@ -118,13 +118,13 @@ class Sender:
                     return  # already ACKed
                 
                 # Retransmit un-ACKed packet.
-                print(f"  [API] RETRANSMIT: Seq {seq_num} timed out. Resending.")
+                print(f"API (Sender) RETRANSMIT: Seq {seq_num} timed out. Resending.")
                 packet, _old_timer = entry
                 
                 try:
                     self.sock.sendto(packet, self.remote_addr)
                 except Exception as e:
-                    print(f"[Sender] retransmit error: {e}")
+                    print(f"API (Sender) retransmit error: {e}")
                 
                 # Start a new timer.
                 new_timer = threading.Timer(RDT_TIMEOUT_MS / 1000, self._retransmit_handler, args=[seq_num])

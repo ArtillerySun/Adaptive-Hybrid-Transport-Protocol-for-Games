@@ -47,7 +47,7 @@ class Receiver:
     # ----------------------------------------------------------------------
     # Reliable data handler  (original entry point, enhanced)
     # ----------------------------------------------------------------------
-    def handle_reliable(self, packet: bytes):
+    def handle_reliable(self, packet: bytes, sender_addr):
         """
         Process an incoming reliable data packet.
         Performs buffering, ordered delivery, and sets a skip deadline if needed.
@@ -58,6 +58,13 @@ class Receiver:
 
         # Store the packet in the reordering buffer
         self.receive_buffer[seq] = (payload, ts_ms)
+
+        # --- send ACK immediately (even if duplicate) ---
+        try:
+            ack_pkt = pack_header(ACK_CHANNEL, seq, now_ms32())
+            self.sock.sendto(ack_pkt, sender_addr)
+        except Exception as e:
+            print(f"API (Receiver) ACK send error (seq={seq}): {e}")
 
         # Attempt in-order delivery of buffered data
         self._try_deliver_from_buffer()
