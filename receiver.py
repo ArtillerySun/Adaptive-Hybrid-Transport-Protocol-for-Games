@@ -24,6 +24,9 @@ class Receiver:
         self.receive_buffer = {}          # seq -> (payload_bytes, timestamp_ms)
         self.skip_deadline_ms = None      # timestamp (ms) for hole-skip timeout
 
+        self.last_arrival_ms = None
+        self.iat_ewma_ms = 0.0
+
         print(f"API (Receiver) listening on {self.sock.getsockname()}")
 
     # ----------------------------------------------------------------------
@@ -120,6 +123,15 @@ class Receiver:
         except Exception as e:
             print(f"API (Receiver) SACK send error (cum_ack={cum_ack}): {e}")
 
+    def _compute_skip_timeout_ms(self) -> int:
+        if self.iat_ewma_ms <= 0:
+            est = MIN_SKIP_MS
+        else:
+            est = SKIP_K * self.iat_ewma_ms
+        ret = max(MIN_SKIP_MS, min(int(est), MAX_SKIP_MS))
+
+        # print(f"Current skip is {ret}.")
+        return ret
 
     # ----------------------------------------------------------------------
     # Reliable data handler
@@ -134,6 +146,11 @@ class Receiver:
         # ignore non-reliable packets
         if chan != DATA_CHANNEL:
             return
+
+        if self.last_arrival_ms is not None:
+            iat = calc_latency_ms(self.last_arrival_ms)
+            self.iat_ewma_ms = iat if self.iat_ewma_ms <= 0 else (1.0 - IAT_ALPHA) * self.iat_ewma_ms + IAT_ALPHA * float(iat)
+        self.last_arrival_ms = now_ms32()
 
         # --- Generate and send SACK immediately (even if duplicate) ---
         # This SACK acknowledges everything received so far.
@@ -152,12 +169,22 @@ class Receiver:
 
         # If there is still a missing sequence number (gap),
         # set a skip deadline if one does not already exist.
-        self.skip_deadline_ms = set_skip_deadline_if_needed(
-            self.receive_buffer,
-            self.next_expected_seq_num,
-            self.skip_deadline_ms,
-            now_ms32(),
-        )
+        # self.skip_deadline_ms = set_skip_deadline_if_needed(
+        #     self.receive_buffer,
+        #     self.next_expected_seq_num,
+        #     self.skip_deadline_ms,
+        #     now_ms32(),
+        # )
+        if self.receive_buffer and self.next_expected_seq_num not in self.receive_buffer:
+            dyn = self._compute_skip_timeout_ms()
+            if self.skip_deadline_ms is None:
+                self.skip_deadline_ms = make_deadline_ms(now_ms32(), dyn)
+            else:
+                remain = time_to_deadline_ms(now_ms32(), self.skip_deadline_ms)
+                if remain is not None and dyn < remain:
+                    self.skip_deadline_ms = make_deadline_ms(now_ms32(), dyn)
+        else:
+            self.skip_deadline_ms = None
 
     # ----------------------------------------------------------------------
     # Unreliable data handler
@@ -206,9 +233,14 @@ class Receiver:
                 self._try_deliver_from_buffer()
 
                 # If another gap remains, reset a new skip deadline
-                self.skip_deadline_ms = clear_or_reset_deadline(
-                    self.receive_buffer, self.next_expected_seq_num, now_ms
-                )
+                # self.skip_deadline_ms = clear_or_reset_deadline(
+                #     self.receive_buffer, self.next_expected_seq_num, now_ms
+                # )
+                if self.receive_buffer and self.next_expected_seq_num not in self.receive_buffer:
+                    dyn = self._compute_skip_timeout_ms()
+                    self.skip_deadline_ms = make_deadline_ms(now_ms, dyn)
+                else:
+                    self.skip_deadline_ms = None
             else:
                 # Deadline expired but the packet IS in the buffer.
                 # This shouldn't happen if _try_deliver_from_buffer is correct.

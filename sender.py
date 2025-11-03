@@ -101,7 +101,7 @@ class Sender:
         
         self.RTO = max(RDT_TIMEOUT_MS, new_rto) 
         self.RTO = min(RTO_MAX, self.RTO) # Apply max bound
-        print(f"Current rto is {self.RTO}.")
+        # print(f"Current rto is {self.RTO}.")
 
     def handle_sack(self, packet: bytes):
         """
@@ -167,7 +167,7 @@ class Sender:
 
         # Start per-packet retransmission timer
         rtx_cnt = 0
-        t = threading.Timer(self.RTO, self._retransmit_handler, args=[seq, rtx_cnt])
+        t = threading.Timer(self.RTO / 1000, self._retransmit_handler, args=[seq, rtx_cnt])
         self.send_buffer[seq] = (pkt, t)
         t.start()
 
@@ -196,7 +196,7 @@ class Sender:
 
             # Start a new timer.
             rtx_cnt += 1
-            new_timer = threading.Timer(min(self.RTO * 2**rtx_cnt, RTO_MAX), self._retransmit_handler, args=[seq_num, rtx_cnt])
+            new_timer = threading.Timer(min(self.RTO * 2**rtx_cnt, RTO_MAX) / 1000, self._retransmit_handler, args=[seq_num, rtx_cnt])
             self.send_buffer[seq_num] = (packet, new_timer)
             new_timer.start()
 

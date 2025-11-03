@@ -18,12 +18,17 @@ SACK_PAYLOAD_SIZE = 2 + (MAX_SACK_BLOCKS * 4)
 SACK_FORMAT = f'!H{MAX_SACK_BLOCKS * "HH"}'
 
 # Default timeout (in ms) 
-RDT_TIMEOUT_MS = 50
+RDT_TIMEOUT_MS = 100
 SKIP_TIMEOUT_MS = 200
 DEFAULT_RECV_TIMEOUT_MS = 50
-RTO_MAX = 5000               # Max RTO (e.g., 5 seconds)
+RTO_MAX = 1000               # Max RTO (e.g., 1 seconds)
 
-RTO_K_FACTOR = 4             # K factor for RTO calculation (often 4)
+MIN_SKIP_MS = 50
+MAX_SKIP_MS = 2000
+IAT_ALPHA   = 0.2
+SKIP_K     = 8.0
+
+RTO_K_FACTOR = 8             # K factor for RTO calculation (often 4)
 
 # --- 16-bit sequence helpers ---
 SEQ_MOD  = 1 << 16        # 65536
