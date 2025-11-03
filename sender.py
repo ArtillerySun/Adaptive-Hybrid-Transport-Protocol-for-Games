@@ -27,6 +27,12 @@ class Sender:
         # --- Unreliable channel state ---
         self.useq = 0                         # 16-bit seq for unreliable packets
 
+        # --- RTO Adaptive State (Industry Standard) ---
+        self.SRTT = RDT_TIMEOUT_MS            # Smoothed RTT 
+        self.RTTVAR = RDT_TIMEOUT_MS / 2      # RTT Variance Estimator
+        self.RTO = RDT_TIMEOUT_MS             # Current RTO
+        self.rtx_cnt = 0
+
         print(f"API (Sender) bound to {self.sock.getsockname()}, sending to {self.remote_addr}")
 
     # ----------------------------------------------------------------------
@@ -74,15 +80,41 @@ class Sender:
             return True
         return False
 
+    def _update_rto(self, rtt_sample: int):
+        """
+        Updates SRTT and RTO using Jacobson's simplified algorithm (EWMA).
+        """
+        # TCP standard alpha (0.125) and beta (0.25)
+        ALPHA = 0.125
+        BETA = 0.25
+        K = RTO_K_FACTOR
+        
+        # 1. Update RTTVAR (Deviation)
+        rtt_deviation = abs(rtt_sample - self.SRTT)
+        self.RTTVAR = int((1 - BETA) * self.RTTVAR + BETA * rtt_deviation)
+
+        # 2. Update SRTT (Average)
+        self.SRTT = int((1 - ALPHA) * self.SRTT + ALPHA * rtt_sample)
+
+        # 3. Calculate RTO: SRTT + K * RTTVAR, applying bounds
+        new_rto = self.SRTT + K * self.RTTVAR
+        
+        self.RTO = max(RDT_TIMEOUT_MS, new_rto) 
+        self.RTO = min(RTO_MAX, self.RTO) # Apply max bound
+        print(f"Current rto is {self.RTO}.")
+
     def handle_sack(self, packet: bytes):
         """
         (Sender-side) A SACK came in.
         Processes cumulative ACK and SACK blocks.
         """
         # Unpack SACK payload
-        chan, _, _, sack_payload = unpack_header(packet)
+        chan, _, tm_ms, sack_payload = unpack_header(packet)
         if chan != ACK_CHANNEL:
             return
+        
+        rtt = calc_latency_ms(tm_ms)
+        self._update_rto(rtt)
 
         try:
             cum_ack, sack_blocks = unpack_sack(sack_payload)
@@ -134,7 +166,8 @@ class Sender:
             print(f"API (Sender) reliable send error (seq={seq}): {e}")
 
         # Start per-packet retransmission timer
-        t = threading.Timer(RDT_TIMEOUT_MS / 1000.0, self._retransmit_handler, args=[seq])
+        rtx_cnt = 0
+        t = threading.Timer(self.RTO, self._retransmit_handler, args=[seq, rtx_cnt])
         self.send_buffer[seq] = (pkt, t)
         t.start()
 
@@ -142,7 +175,7 @@ class Sender:
         self.seq_num = seq_inc(self.seq_num)
 
 
-    def _retransmit_handler(self, seq_num: int):
+    def _retransmit_handler(self, seq_num: int, rtx_cnt: int):
         """
         Called by a timer when a SACK wasn't received for this packet.
         """
@@ -162,7 +195,8 @@ class Sender:
                 print(f"API (Sender) retransmit error: {e}")
 
             # Start a new timer.
-            new_timer = threading.Timer(RDT_TIMEOUT_MS / 1000, self._retransmit_handler, args=[seq_num])
+            rtx_cnt += 1
+            new_timer = threading.Timer(min(self.RTO * 2**rtx_cnt, RTO_MAX), self._retransmit_handler, args=[seq_num, rtx_cnt])
             self.send_buffer[seq_num] = (packet, new_timer)
             new_timer.start()
 
