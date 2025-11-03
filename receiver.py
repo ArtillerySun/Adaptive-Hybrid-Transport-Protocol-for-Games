@@ -2,6 +2,8 @@ import struct
 import queue
 import socket
 
+from functools import cmp_to_key
+
 from utils import *
 
 class Receiver:
@@ -45,14 +47,77 @@ class Receiver:
             self.skip_deadline_ms = None  # reset skip timer when sequence advances
 
     # ----------------------------------------------------------------------
-    # Send ACK 
+    # SACK generation helper
     # ----------------------------------------------------------------------
-    def _send_ack(self, seq: int, sender_addr):
+    def _get_sack_blocks(self) -> list:
+        """
+        Analyzes the buffer to generate a list of contiguous received blocks
+        that are *after* the next_expected_seq_num.
+        Returns a list of (start_seq, end_seq_inclusive) tuples.
+        """
+        if not self.receive_buffer:
+            return []
+
+        # Create a comparison function that sorts based on distance from next_expected
+        def compare_seq(a, b):
+            a_dist = (a - self.next_expected_seq_num) & SEQ_MASK
+            b_dist = (b - self.next_expected_seq_num) & SEQ_MASK
+            return a_dist - b_dist
+
+        # Sort keys based on their sequence order *after* the cumulative ACK point
+        sorted_keys = sorted(self.receive_buffer.keys(), key=cmp_to_key(compare_seq))
+
+        sack_blocks = []
+        start_of_block = None
+        current_seq_in_block = None
+
+        for seq in sorted_keys:
+            # Skip any sequences that are at or before the cumulative ACK point
+            if not is_seq_less_than(self.next_expected_seq_num, seq):
+                continue
+
+            if start_of_block is None:
+                start_of_block = seq
+            if current_seq_in_block is None:
+                current_seq_in_block = seq
+            elif seq == seq_inc(current_seq_in_block):
+                # This sequence is contiguous, extend the block
+                current_seq_in_block = seq
+            else:
+                # Gap detected. Close the previous block.
+                sack_blocks.append((start_of_block, current_seq_in_block))
+                if len(sack_blocks) >= MAX_SACK_BLOCKS:
+                    return sack_blocks # Stop if we've filled our SACK blocks
+
+                # Start a new block
+                start_of_block = seq
+                current_seq_in_block = seq
+
+        # Close the last open block, if any
+        if start_of_block is not None:
+            sack_blocks.append((start_of_block, current_seq_in_block))
+
+        return sack_blocks[:MAX_SACK_BLOCKS]
+
+
+    # ----------------------------------------------------------------------
+    # Send SACK
+    # ----------------------------------------------------------------------
+    def _send_sack(self, sender_addr):
+        """
+        Generates and sends a SACK packet containing the cumulative ACK
+        and all available SACK blocks from the buffer.
+        """
+        cum_ack = self.next_expected_seq_num
+        sack_blocks = self._get_sack_blocks()
+
         try:
-            ack_pkt = pack_header(ACK_CHANNEL, seq, now_ms32())
+            sack_payload = pack_sack(cum_ack, sack_blocks) 
+            # Use seq=0 in header as a dummy, channel is ACK_CHANNEL
+            ack_pkt = pack_header(ACK_CHANNEL, 0, now_ms32()) + sack_payload
             self.sock.sendto(ack_pkt, sender_addr)
         except Exception as e:
-            print(f"API (Receiver) ACK send error (seq={seq}): {e}")
+            print(f"API (Receiver) SACK send error (cum_ack={cum_ack}): {e}")
 
 
     # ----------------------------------------------------------------------
@@ -64,20 +129,22 @@ class Receiver:
         Performs buffering, ordered delivery, and sets a skip deadline if needed.
         """
         chan, seq, ts_ms, payload = unpack_header(packet)
-        
+
         # ignore non-reliable packets
         if chan != DATA_CHANNEL:
             return
 
-        # --- send ACK immediately (even if duplicate) ---
-        self._send_ack(seq, sender_addr)
+        # --- Generate and send SACK immediately (even if duplicate) ---
+        # This SACK acknowledges everything received so far.
+        self._send_sack(sender_addr)
 
-        # ignore duplicate packets
-        if seq < self.next_expected_seq_num:
+        # ignore packets that are already cumulatively ACKed (old duplicates)
+        if is_seq_less_than(seq, self.next_expected_seq_num):
             return
 
-        # Store the packet in the reordering buffer
-        self.receive_buffer[seq] = (payload, ts_ms)
+        # Store the packet in the reordering buffer (if not already present)
+        if seq not in self.receive_buffer:
+            self.receive_buffer[seq] = (payload, ts_ms)
 
         # Attempt in-order delivery of buffered data
         self._try_deliver_from_buffer()
@@ -117,21 +184,32 @@ class Receiver:
         """
 
         if not self.receive_buffer:
+            self.skip_deadline_ms = None # No data, clear deadline
             return
 
         ttd = time_to_deadline_ms(now_ms, self.skip_deadline_ms)
-        if ttd is not None and ttd <= 0 and self.next_expected_seq_num not in self.receive_buffer:
-            missing = self.next_expected_seq_num
-            print(f"API (Receiver) Skip timeout reached, skipping missing seq={missing}")
 
-            # Advance to the next expected sequence number
-            self.next_expected_seq_num = seq_inc(self.next_expected_seq_num)
-            self.skip_deadline_ms = None
+        if ttd is not None and ttd <= 0:
+            # Timeout expired!
+            if self.next_expected_seq_num not in self.receive_buffer:
+                missing = self.next_expected_seq_num
+                print(f"API (Receiver) Skip timeout reached, skipping missing seq={missing}")
 
-            # Deliver any packets that are now in order
-            self._try_deliver_from_buffer()
+                # Advance to the next expected sequence number
+                self.next_expected_seq_num = seq_inc(self.next_expected_seq_num)
+                self.skip_deadline_ms = None # We just skipped, clear deadline
 
-            # If another gap remains, reset a new skip deadline
-            self.skip_deadline_ms = clear_or_reset_deadline(
-                self.receive_buffer, self.next_expected_seq_num, now_ms
-            )
+                # Deliver any packets that are now in order
+                self._try_deliver_from_buffer()
+
+                # If another gap remains, reset a new skip deadline
+                self.skip_deadline_ms = clear_or_reset_deadline(
+                    self.receive_buffer, self.next_expected_seq_num, now_ms
+                )
+            else:
+                # Deadline expired but the packet IS in the buffer.
+                # This shouldn't happen if _try_deliver_from_buffer is correct.
+                # We'll just clear the deadline.
+                self.skip_deadline_ms = None
+                self._try_deliver_from_buffer() # Try again
+
