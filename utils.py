@@ -31,7 +31,7 @@ def now_ms32() -> int:
     """ms clock, within 32-bit."""
     return (time.monotonic_ns() // 1_000_000) & 0xFFFFFFFF
 
-def calc_rtt_ms(recv_time: int) -> int:
+def calc_latency_ms(recv_time: int) -> int:
     return (now_ms32() - recv_time) & 0xFFFFFFFF
 
 def seq_inc(x: int) -> int:

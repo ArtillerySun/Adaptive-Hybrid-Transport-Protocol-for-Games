@@ -104,8 +104,8 @@ class ReliableUDP_API:
         """
         Non-blocking read from the delivery queue.
         Returns:
-          - (seq, ts_ms, payload, rtt) for reliable channel
-          - (None, ts_ms, payload, rtt) for unreliable channel
+          - (seq, ts_ms, payload, latency) for reliable channel
+          - (None, ts_ms, payload, latency) for unreliable channel
           or None if no message is available.
         """
         try:
