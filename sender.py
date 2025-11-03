@@ -17,16 +17,18 @@ class Sender:
 
         # --- Reliable sending state ---
         self.seq_num = 0                      # next sequence number to use (16-bit)
+        self.base_seq = 0                     # lowest unACKed sequence number (window start)
         self.send_buffer = {}                 # seq -> (packet_bytes, timer)
         self.SND_WIN = snd_win                # max in-flight reliable packets
-        self.inflight = 0                     # current in-flight reliable packets
+        # inflight is now calculated as (seq_num - base_seq)
+        # self.inflight = 0                     # current in-flight reliable packets
         self.pending_q = deque()              # queued payloads waiting for window
 
         # --- Unreliable channel state ---
         self.useq = 0                         # 16-bit seq for unreliable packets
 
         print(f"API (Sender) bound to {self.sock.getsockname()}, sending to {self.remote_addr}")
-    
+
     # ----------------------------------------------------------------------
     # Public API
     # ----------------------------------------------------------------------
@@ -37,12 +39,15 @@ class Sender:
         automatically when ACKs arrive and free up space.
         """
         with self.lock:
-            if self.inflight >= self.SND_WIN:
+            # Calculate current inflight packets
+            inflight = (self.seq_num - self.base_seq) & SEQ_MASK
+
+            if inflight >= self.SND_WIN:
                 # Window is full
                 self.pending_q.append(data)
             else:
                 self._send_one_reliable_locked(data)
-    
+
     def send_unreliable(self, data: bytes):
         """
         Best-effort delivery; immediately send and bump the unreliable seq.
@@ -57,28 +62,58 @@ class Sender:
             self.useq = seq_inc(self.useq)
 
     # ----------------------------------------------------------------------
-    # ACK handling
+    # SACK handling
     # ----------------------------------------------------------------------
-    def handle_ack(self, ack_num: int):
-        """
-        (Sender-side) An ACK came in.
-        """
-        with self.lock:
-            entry = self.send_buffer.pop(ack_num, None)
-
-            if entry is None:
-                return  # duplicate or late ACK; ignore
-            
+    def _mark_acked_and_cleanup(self, seq_num: int):
+        """Helper to remove seq_num from buffer and cancel its timer."""
+        entry = self.send_buffer.pop(seq_num, None)
+        if entry is not None:
             _packet, timer = entry
             timer.cancel()
-            
-            self.inflight = max(0, self.inflight - 1)
-            print(f"API (Sender) Received ACK for {ack_num}")
+            # print(f"API (Sender) ACKed {seq_num}")
+            return True
+        return False
 
-            # Try to fill the window with queued payloads
-            while self.pending_q and self.inflight < self.SND_WIN:
+    def handle_sack(self, packet: bytes):
+        """
+        (Sender-side) A SACK came in.
+        Processes cumulative ACK and SACK blocks.
+        """
+        # Unpack SACK payload
+        chan, _, _, sack_payload = unpack_header(packet)
+        if chan != ACK_CHANNEL:
+            return
+
+        try:
+            cum_ack, sack_blocks = unpack_sack(sack_payload)
+        except Exception as e:
+            print(f"API (Sender) SACK unpack error: {e}")
+            return
+
+        with self.lock:
+            # 1. Process Cumulative ACK
+            # Move the base_seq forward up to the cum_ack
+            while is_seq_less_than(self.base_seq, cum_ack):
+                self._mark_acked_and_cleanup(self.base_seq)
+                self.base_seq = seq_inc(self.base_seq)
+
+            # 2. Process SACK Blocks (Selective ACKs)
+            for start, end in sack_blocks:
+                curr = start
+                # Iterate from start up to and including end sequence
+                while is_seq_in_range(curr, start, end):
+                    self._mark_acked_and_cleanup(curr)
+                    if curr == end:
+                        break
+                    curr = seq_inc(curr)
+
+            # 3. Try to fill the window with queued payloads
+            inflight = (self.seq_num - self.base_seq) & SEQ_MASK
+            while self.pending_q and inflight < self.SND_WIN:
                 payload = self.pending_q.popleft()
                 self._send_one_reliable_locked(payload)
+                inflight = (self.seq_num - self.base_seq) & SEQ_MASK
+
 
     # ----------------------------------------------------------------------
     # Internal helpers (require self.lock held)
@@ -103,33 +138,33 @@ class Sender:
         self.send_buffer[seq] = (pkt, t)
         t.start()
 
-        # Advance reliable sequence and inflight counter
+        # Advance reliable sequence
         self.seq_num = seq_inc(self.seq_num)
-        self.inflight += 1
+
 
     def _retransmit_handler(self, seq_num: int):
         """
-        Called by a timer when an ACK wasn't received.
+        Called by a timer when a SACK wasn't received for this packet.
         """
         with self.lock:
-            if seq_num in self.send_buffer:
-                entry = self.send_buffer.get(seq_num)
-                if entry is None:
-                    return  # already ACKed
-                
-                # Retransmit un-ACKed packet.
-                print(f"API (Sender) RETRANSMIT: Seq {seq_num} timed out. Resending.")
-                packet, _old_timer = entry
-                
-                try:
-                    self.sock.sendto(packet, self.remote_addr)
-                except Exception as e:
-                    print(f"API (Sender) retransmit error: {e}")
-                
-                # Start a new timer.
-                new_timer = threading.Timer(RDT_TIMEOUT_MS / 1000, self._retransmit_handler, args=[seq_num])
-                self.send_buffer[seq_num] = (packet, new_timer)
-                new_timer.start()
+            # Use .get() to avoid race conditions if SACK arrived just after timer fired
+            entry = self.send_buffer.get(seq_num)
+            if entry is None:
+                return  # already ACKed by SACK
+
+            # Retransmit un-ACKed packet.
+            print(f"API (Sender) RETRANSMIT: Seq {seq_num} timed out. Resending.")
+            packet, _old_timer = entry
+
+            try:
+                self.sock.sendto(packet, self.remote_addr)
+            except Exception as e:
+                print(f"API (Sender) retransmit error: {e}")
+
+            # Start a new timer.
+            new_timer = threading.Timer(RDT_TIMEOUT_MS / 1000, self._retransmit_handler, args=[seq_num])
+            self.send_buffer[seq_num] = (packet, new_timer)
+            new_timer.start()
 
     # ----------------------------------------------------------------------
     # Shutdown
@@ -143,4 +178,6 @@ class Sender:
                 t.cancel()
             self.send_buffer.clear()
             self.pending_q.clear()
-            self.inflight = 0
+            self.seq_num = 0
+            self.base_seq = 0
+

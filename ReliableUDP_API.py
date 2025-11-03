@@ -59,21 +59,30 @@ class ReliableUDP_API:
                     self._receiver.handle_reliable(packet, sender_addr)
                 elif channel_type == ACK_CHANNEL:
                     if self._sender is not None:
-                        self._sender.handle_ack(seq)
+                        # --- THIS IS THE CHANGE ---
+                        # Pass the whole packet for SACK processing
+                        self._sender.handle_sack(packet)
                 elif channel_type == UNREL_CHANNEL:
                     self._receiver.handle_unreliable(packet)
-                    continue
+                    # No need to continue, loop will restart
                 else:
-                    continue
+                    # Unknown channel, ignore
+                    pass
 
             except socket.timeout:
                 self._receiver.on_idle(now_ms32())
             except OSError as e:
+                # 11 = EWOULDBLOCK / EAGAIN (common on non-blocking, but we use timeout)
+                if self.stop_event.is_set():
+                    break # Exit loop if we are closing
                 if e.errno == 11:
                     # nothing to read, just idle
                     self._receiver.on_idle(now_ms32())
                 else:
                     print(f"API Receive error: {e}")
+            except Exception as e:
+                if not self.stop_event.is_set():
+                    print(f"API unhandled error in _io_loop: {e}")
 
     # ----------------------------------------------------------------------
     # Public API
@@ -115,11 +124,20 @@ class ReliableUDP_API:
             except Exception:
                 pass
 
+        # Nudge the socket to close to unblock recvfrom
+        # This is a bit of a hack, but effective
+        try:
+            dummy_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            dummy_sock.sendto(b'close', self.local_addr)
+            dummy_sock.close()
+        except Exception:
+            pass
+
         try:
             self.io_thread.join(timeout=1.0)
         except RuntimeError:
             pass
-                       
+
         self.sock.close()
         print("API closed.")
-        
+
