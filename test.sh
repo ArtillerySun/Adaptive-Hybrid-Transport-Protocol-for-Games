@@ -63,10 +63,10 @@ try:
     while time.time() - t0 < ${DURATION}:
         item = api.receive()
         if item:
-            seq, ts_ms, payload = item
+            seq, ts_ms, payload, rtt = item
             chan = "R" if seq is not None else "U"
             # short print for observation
-            print(f"[Receiver] {chan} seq={'-' if seq is None else seq} len={len(payload)} payload={payload[:40]!r}")
+            print(f"[Receiver] {chan} seq={'-' if seq is None else seq} len={len(payload)} payload={payload[:40]!r} rtt={rtt}")
         time.sleep(0.005)
 finally:
     api.close()

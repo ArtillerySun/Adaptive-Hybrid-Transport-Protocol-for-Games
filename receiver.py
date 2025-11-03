@@ -39,7 +39,8 @@ class Receiver:
         progressed = False
         while self.next_expected_seq_num in self.receive_buffer:
             payload, ts_ms = self.receive_buffer.pop(self.next_expected_seq_num)
-            self.delivery_queue.put((self.next_expected_seq_num, ts_ms, payload))
+            rtt = calc_rtt_ms(ts_ms)
+            self.delivery_queue.put((self.next_expected_seq_num, ts_ms, payload, rtt))
             self.next_expected_seq_num = seq_inc(self.next_expected_seq_num)
             progressed = True
 
@@ -169,7 +170,9 @@ class Receiver:
         chan, _, ts_ms, payload = unpack_header(packet)
         if chan != UNREL_CHANNEL:
             return
-        self.delivery_queue.put((None, ts_ms, payload))
+
+        rtt = calc_rtt_ms(ts_ms)
+        self.delivery_queue.put((None, ts_ms, payload, rtt))
 
     # ----------------------------------------------------------------------
     # Idle timer handler (called on socket timeout)
