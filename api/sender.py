@@ -10,7 +10,7 @@ class Sender:
     Sender side for the reliable/unreliable hybrid protocol.
     """
 
-    def __init__(self, sock, remote_addr, lock, snd_win: int = 64):
+    def __init__(self, sock, remote_addr, lock, snd_win: int = 512):
         self.sock = sock
         self.remote_addr = remote_addr
         self.lock = lock
@@ -28,10 +28,12 @@ class Sender:
         self.useq = 0                         # 16-bit seq for unreliable packets
 
         # --- RTO Adaptive State (Industry Standard) ---
-        self.SRTT = RDT_TIMEOUT_MS            # Smoothed RTT 
-        self.RTTVAR = RDT_TIMEOUT_MS / 2      # RTT Variance Estimator
-        self.RTO = RDT_TIMEOUT_MS             # Current RTO
+        self.SRTT = RDT_TIMEOUT_MS                          # Smoothed RTT 
+        self.RTTVAR = max(int(RDT_TIMEOUT_MS / 2), 50)      # RTT Variance Estimator
+        self.RTO = min(max(2 * self.SRTT, self.SRTT + RTO_K_FACTOR * self.RTTVAR), 
+                       RTO_MAX)                             # Current RTO
         self.rtx_cnt = 0
+        self._last_send_ms = 0
 
         print(f"API (Sender) bound to {self.sock.getsockname()}, sending to {self.remote_addr}")
 
@@ -92,6 +94,7 @@ class Sender:
         # 1. Update RTTVAR (Deviation)
         rtt_deviation = abs(rtt_sample - self.SRTT)
         self.RTTVAR = int((1 - BETA) * self.RTTVAR + BETA * rtt_deviation)
+        old_rto = self.RTO
 
         # 2. Update SRTT (Average)
         self.SRTT = int((1 - ALPHA) * self.SRTT + ALPHA * rtt_sample)
@@ -99,9 +102,23 @@ class Sender:
         # 3. Calculate RTO: SRTT + K * RTTVAR, applying bounds
         new_rto = self.SRTT + K * self.RTTVAR
         
-        self.RTO = max(RDT_TIMEOUT_MS, new_rto) 
+        self.RTO = max(2 * self.SRTT, new_rto) 
         self.RTO = min(RTO_MAX, self.RTO) # Apply max bound
         # print(f"Current rto is {self.RTO}.")
+
+        if abs(self.RTO - old_rto) >= max(50, int(old_rto * 0.5)):
+            for seq, (packet, timer) in list(self.send_buffer.items()):
+                timer.cancel()
+                t = threading.Timer(self.RTO / 1000, self._retransmit_handler, args=[seq, 0])
+                self.send_buffer[seq] = (packet, t)
+                t.start()
+
+    def _maybe_pace_locked(self):
+        now = now_ms32()
+        gap = now - self._last_send_ms
+        if gap < 1:  # 1ms
+            time.sleep((1 - gap) / 1000.0)
+        self._last_send_ms = now
 
     def handle_sack(self, packet: bytes):
         """
@@ -158,6 +175,7 @@ class Sender:
         seq = self.seq_num
         timestamp = now_ms32()
         pkt = pack_header(DATA_CHANNEL, seq, timestamp) + data
+        self._maybe_pace_locked()
 
         # Send the packet
         try:

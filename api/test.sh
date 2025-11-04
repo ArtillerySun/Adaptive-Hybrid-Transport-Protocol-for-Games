@@ -24,10 +24,10 @@ LOSS="${LOSS:-20}"               # loss % for netem (e.g., 20)
 DELAY_MS="${DELAY_MS:-200}"       # delay ms for netem
 JITTER_MS="${JITTER_MS:-50}"     # jitter ms for netem
 REORDER="${REORDER:-20}"         # reorder % for netem
-NREL="${NREL:-500}"              # number of reliable packets to send
-NUNREL="${NUNREL:-200}"          # number of unreliable packets to send
+NREL="${NREL:-5000}"              # number of reliable packets to send
+NUNREL="${NUNREL:-2000}"          # number of unreliable packets to send
 PPS="${PPS:-100}"                # overall packet rate (packets per second)
-DURATION="${DURATION:-30}"      # receiver runtime seconds
+DURATION="${DURATION:-100}"      # receiver runtime seconds
 # ---------------------------------------------------------
 
 TC=$(command -v tc || true)
