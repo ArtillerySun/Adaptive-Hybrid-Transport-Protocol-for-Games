@@ -20,12 +20,20 @@ SACK_FORMAT = f'!H{MAX_SACK_BLOCKS * "HH"}'
 # Default timeout (in ms) 
 RDT_TIMEOUT_MS = 100
 SKIP_TIMEOUT_MS = 200
-DEFAULT_RECV_TIMEOUT_MS = 50
+DEFAULT_RECV_TIMEOUT_MS = 10
+RTO_MAX = 1000               # Max RTO (e.g., 1 seconds)
+
+MIN_SKIP_MS = 100
+MAX_SKIP_MS = 2000
+IAT_ALPHA   = 0.2
+SKIP_K     = 8.0
+
+RTO_K_FACTOR = 4             # K factor for RTO calculation (often 4)
 
 # --- 16-bit sequence helpers ---
 SEQ_MOD  = 1 << 16        # 65536
 SEQ_MASK = SEQ_MOD - 1    # 0xFFFF
-RECV_WIN = 512            # Receive window size, which can be adjust (< 32768 should be safe)
+RECV_WIN = 1024            # Receive window size, which can be adjust (< 32768 should be safe)
 
 def now_ms32() -> int:
     """ms clock, within 32-bit."""

@@ -20,14 +20,14 @@ SPORT="${SPORT:-6001}"          # sender local port
 REMOTE_HOST="${REMOTE_HOST:-127.0.0.1}"
 REMOTE_PORT="${REMOTE_PORT:-$RPORT}"  # where sender sends to (can be proxy)
 USE_NETEM="${USE_NETEM:-1}"     # 1=apply tc netem on lo, 0=no
-LOSS="${LOSS:-10}"               # loss % for netem (e.g., 20)
+LOSS="${LOSS:-20}"               # loss % for netem (e.g., 20)
 DELAY_MS="${DELAY_MS:-200}"       # delay ms for netem
 JITTER_MS="${JITTER_MS:-50}"     # jitter ms for netem
 REORDER="${REORDER:-20}"         # reorder % for netem
-NREL="${NREL:-50}"              # number of reliable packets to send
-NUNREL="${NUNREL:-20}"          # number of unreliable packets to send
-PPS="${PPS:-10}"                # overall packet rate (packets per second)
-DURATION="${DURATION:-20}"      # receiver runtime seconds
+NREL="${NREL:-5000}"              # number of reliable packets to send
+NUNREL="${NUNREL:-2000}"          # number of unreliable packets to send
+PPS="${PPS:-100}"                # overall packet rate (packets per second)
+DURATION="${DURATION:-100}"      # receiver runtime seconds
 # ---------------------------------------------------------
 
 TC=$(command -v tc || true)
