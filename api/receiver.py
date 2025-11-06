@@ -4,7 +4,7 @@ import socket
 
 from functools import cmp_to_key
 
-from utils import *
+from .utils import *
 
 class Receiver:
     """
