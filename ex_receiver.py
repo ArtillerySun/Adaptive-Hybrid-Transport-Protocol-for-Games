@@ -2,7 +2,7 @@ import time
 import json
 import sys
 import numpy as np
-from api import ReliableUDP_API
+from api.ReliableUDP_API import ReliableUDP_API
 
 DEFAULT_PORT = 6000
 TEST_DURATION_SEC = 35 # Give 5s buffer for last packets to arrive

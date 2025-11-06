@@ -3,10 +3,10 @@ import struct
 import threading
 import queue
 
-from utils import *
+from .utils import *
 
-from sender import Sender
-from receiver import Receiver
+from .sender import Sender
+from .receiver import Receiver
 
 class ReliableUDP_API:
     """

@@ -3,7 +3,7 @@ import struct
 import threading
 from collections import deque
 
-from utils import *
+from .utils import *
 
 class Sender:
     """
